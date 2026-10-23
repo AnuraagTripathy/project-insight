@@ -1,0 +1,9 @@
+# ScholarCatalyst is CC BY-NC 4.0: never commit the data, use scripts/download_data.py
+data/
+outputs/
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
