@@ -1,0 +1,8 @@
+# Shared data settings, read by insight.data.DataConfig.from_yaml.
+data_dir: data
+# Candidates must be published no later than the question's source paper.
+date_filter: true
+# Credited and rejected papers for a question are always kept (decision log, Oct 23).
+date_filter_exempt_labeled: true
+# The one paper with the placeholder date 1899-12-30 has no real date (decision log, Oct 26).
+keep_undated: true

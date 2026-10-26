@@ -21,7 +21,7 @@ Each item is one commit. Check it off (`[x]`, with the short commit description)
 ## Schedule
 
 ### Week of Oct 26: data, metrics, BM25
-- [ ] **Mon Oct 26**: `src/insight/data.py` (loaders for all four subsets, ISO8601 date parsing, date filter per the decision log) + `tests/test_data.py` (sizes 190,896 / 894 / 207 / 687, every labeled ID resolves, date filter keeps labeled papers).
+- [x] **Mon Oct 26** (done: data loaders, date filter with `configs/data.yaml`, 12 tests): `src/insight/data.py` (loaders for all four subsets, ISO8601 date parsing, date filter per the decision log) + `tests/test_data.py` (sizes 190,896 / 894 / 207 / 687, every labeled ID resolves, date filter keeps labeled papers).
 - [ ] **Wed Oct 28**: `src/insight/metrics.py` (Recall@K, nDCG@K, MRR, pairwise accuracy) + `src/insight/folds.py` (5 project-level folds, 20% inner validation split, fixed seed) + tests: hand-computed toy cases, `ranx` agreement to 1e-6, edge cases, no project in two folds, no query split from its project.
 - [ ] **Fri Oct 30**: `src/insight/retrieve_bm25.py` + `scripts/run_bm25.py` (condition A) + `notebooks/02_bm25_baseline.ipynb` comparing core and subfield Recall@20 with the paper (gate: within 0.03 of 0.23) + `.github/workflows/tests.yml` (pytest on push; tests that need full data are skipped in CI).
 
@@ -61,7 +61,11 @@ Commands for Anuraag to run on the H100. The agent appends; Anuraag removes an e
 | Date | Decision | Default chosen | Status |
 |---|---|---|---|
 | Oct 23 | Date filter vs 27 credited papers published after their source paper | Filter only unlabeled candidates; credited and rejected papers are always kept. Config flag `date_filter_exempt_labeled: true`. | Decided by Anuraag |
+| Oct 26 | The one corpus paper dated `1899-12-30` (a placeholder for a missing date) | Treat as undated and keep it as a candidate for every question, since it cannot be shown to be later. Config flag `keep_undated: true`. | NEEDS REVIEW |
+| Oct 26 | How "no later than the source paper" is compared | Compare calendar days (time of day dropped), same day counts as allowed; `YYYY` and `YYYY-MM` dates count as the first day of the period, which is lenient (keeps them). | NEEDS REVIEW |
 
 ## Notes for Anuraag
 
 (The agent writes anything that needs your attention here.)
+
+- **Oct 26, data loader.** `insight.data.load()` returns corpus, queries and a unified per-question label table; `candidate_masks()` gives the allowed corpus rows per question. Tests confirm the strict filter (no exemption) would lose exactly 27 credited pairs and the default loses none. Measured with this code: the date filter is mild, it keeps between 188,351 and 190,896 of the 190,896 papers per question (median 190,454), because all 207 source papers are from 2025 (143) or 2026 (64). Two small date decisions are logged above as NEEDS REVIEW.

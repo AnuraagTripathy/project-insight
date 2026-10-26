@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = "==3.12.*"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -464,6 +464,7 @@ dependencies = [
     { name = "datasets" },
     { name = "matplotlib" },
     { name = "pandas" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -478,6 +479,7 @@ requires-dist = [
     { name = "datasets" },
     { name = "matplotlib" },
     { name = "pandas" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 
 [package.metadata.requires-dev]
