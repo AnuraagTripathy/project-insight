@@ -1,0 +1,7 @@
+# Project-level cross-validation, read by insight.folds.FoldConfig.from_yaml.
+# All questions of one project (source paper) stay in the same fold.
+n_folds: 5
+# Share of the training projects held out as inner validation (tuning, early stopping).
+val_frac: 0.2
+# Fixed seed for the project shuffle and the validation draw (decision log, Oct 28).
+seed: 0

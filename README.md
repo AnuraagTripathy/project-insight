@@ -14,6 +14,8 @@ uv run python scripts/download_data.py   # writes data/*.parquet (CC BY-NC 4.0, 
 ## Code
 
 - `src/insight/data.py`: loads the four subsets, parses the mixed date formats, and builds the per-question candidate date filter (settings in `configs/data.yaml`).
+- `src/insight/metrics.py`: Recall@K, nDCG@K, MRR and pairwise accuracy (checked against `ranx`).
+- `src/insight/folds.py`: 5 project-level folds with an inner validation split (settings in `configs/folds.yaml`); `uv run python scripts/make_folds.py` writes `results/folds.csv`.
 - Tests: `uv run pytest` (tests that need the full dataset are skipped when `data/` is missing).
 
 ## Notebooks
