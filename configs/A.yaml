@@ -1,0 +1,15 @@
+# Condition A: BM25 over the full corpus, read by insight.retrieve_bm25.BM25Config.from_yaml.
+# The paper does not give its tokenizer or parameters; these are bm25s defaults (decision log, Oct 30).
+bm25:
+  k1: 1.5
+  b: 0.75
+  method: lucene
+  stopwords: en
+  # PyStemmer language (for example english), or null for no stemming (decision log, Oct 30).
+  stemmer: null
+  # Corpus columns joined into the indexed text.
+  fields: [title, text]
+  # Papers kept per question (Recall@100 needs 100).
+  top_k: 100
+# Date filter settings come from configs/data.yaml.
+data_config: configs/data.yaml
