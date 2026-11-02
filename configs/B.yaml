@@ -1,0 +1,20 @@
+# Condition B: frozen Qwen3-Embedding-4B + FAISS exact inner product, read by
+# insight.retrieve_dense.DenseConfig.from_yaml. The top 100 is the shortlist C, D and E rescore.
+dense:
+  model: Qwen/Qwen3-Embedding-4B
+  # Prepended to every question as "Instruct: {instruction}\nQuery:{question}" (model card format).
+  # Text from ScholarCatalyst (arXiv:2610.02202), Appendix C.
+  instruction: "Given a scientific research question, retrieve papers that could inspire or contribute to answering the question, including relevant background knowledge, methods, and ideas."
+  # Each paper is embedded as title + "\n" + abstract (decision log, Nov 2).
+  fields: [title, text]
+  field_sep: "\n"
+  # Token caps (the model accepts 32K); see the decision log, Nov 2, for how many texts they cut.
+  max_length_query: 512
+  max_length_doc: 1024
+  batch_size: 32
+  dtype: bfloat16
+  attn_implementation: sdpa
+  # Papers kept per question (the shortlist).
+  top_k: 100
+# Date filter settings come from configs/data.yaml.
+data_config: configs/data.yaml

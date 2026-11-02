@@ -10,6 +10,9 @@ dependencies = [
     "pyyaml>=6.0.3",
     "bm25s>=0.3.16",
     "pystemmer>=3.1.0",
+    "torch>=2.15.0",
+    "transformers>=5.22.1",
+    "faiss-cpu>=1.15.1",
 ]
 
 [dependency-groups]
