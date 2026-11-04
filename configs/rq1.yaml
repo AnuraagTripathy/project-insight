@@ -1,0 +1,22 @@
+# RQ1 diagnosis (insight.diagnose), used by notebooks/04_rq1_coverage.ipynb.
+# Ranking to diagnose. The plan is condition B's shortlist; until results/shortlist_B.parquet
+# exists the notebook falls back to condition A (BM25) and says so.
+run: results/shortlist_B.parquet
+fallback_run: results/run_A.parquet
+# Rank bins for credited papers: 1 to 20, 21 to 100, beyond 100.
+bin_edges: [20, 100]
+# Category mapping for the cross-field split (decision log, Nov 4, NEEDS REVIEW).
+fields:
+  # primary: full arXiv primary category (cs.LG vs cs.CV is cross-field), the granularity of
+  # the paper's domain tables. archive: only the part before the dot (cs, stat, math, ...).
+  level: primary
+  # Papers without an arXiv category code (Semantic Scholar fields, OpenAlex concepts, blanks):
+  # exclude (reported as "unknown") or cross (counted as cross-field).
+  unknown_policy: exclude
+  # Used only at level archive: Semantic Scholar field names mapped to an arXiv archive.
+  name_map:
+    Computer Science: cs
+    Computer science: cs
+    Mathematics: math
+    Physics: physics
+    Statistics: stat
