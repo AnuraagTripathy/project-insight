@@ -1,0 +1,23 @@
+# Condition C: Qwen3-Reranker-0.6B off the shelf, rescoring condition B's top 100 with the
+# inspiration instruction. Read by insight.rerank.RerankConfig.from_yaml.
+rerank:
+  model: Qwen/Qwen3-Reranker-0.6B
+  # Goes after "<Instruct>: " in the model card's prompt. Our wording (decision log, Nov 9),
+  # condensed from ScholarCatalyst's listwise reranking prompt (arXiv:2610.02202, Appendix G.2).
+  # The card's default, for comparison: "Given a web search query, retrieve relevant passages that answer the query"
+  instruction: "Given a research question, judge whether the paper could inspire the research: its scientific contribution would meaningfully inform how a researcher thinks about or approaches the question, rather than being merely topically related"
+  # Each paper is shown as title + "\n" + abstract, as in condition B (decision log, Nov 2).
+  fields: [title, text]
+  field_sep: "\n"
+  # Cap on the whole prompt in tokens, the model card's value. Measured: the longest labeled pair
+  # is about 2,075 tokens, so nothing is truncated.
+  max_length: 8192
+  batch_size: 16
+  dtype: bfloat16
+  attn_implementation: sdpa
+  # Shortlist papers rescored per question, and reranked papers written per question.
+  depth: 100
+  top_k: 100
+# The shortlist C, D and E rescore (H100 queue item 1 writes it).
+shortlist: results/shortlist_B.parquet
+data_config: configs/data.yaml
