@@ -127,8 +127,12 @@ class Reranker:
         return {k: v.to(self.device) for k, v in batch.items()}
 
     def score_inputs(self, inputs):
-        """s = z_yes - z_no at the last position, as a float tensor (gradients kept)."""
-        logits = self.model(**inputs).logits[:, -1, :]
+        """s = z_yes - z_no at the last position, as a float tensor (gradients kept).
+
+        logits_to_keep=1 makes the model project only the last position onto the vocabulary
+        (151,669 tokens) instead of every position, which is what dominates memory in training.
+        """
+        logits = self.model(**inputs, logits_to_keep=1).logits[:, -1, :]
         return (logits[:, self.yes_id] - logits[:, self.no_id]).float()
 
     def score(self, queries: list[str], docs: list[str], batch_size: int | None = None,

@@ -13,6 +13,7 @@ dependencies = [
     "torch>=2.15.0",
     "transformers>=5.22.1",
     "faiss-cpu>=1.15.1",
+    "peft>=0.21.2",
 ]
 
 [dependency-groups]
