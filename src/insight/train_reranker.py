@@ -276,3 +276,88 @@ def train(reranker, pairs: pd.DataFrame, val: pd.DataFrame | None, question_of: 
     return {"history": pd.DataFrame(history), "best_step": best["step"],
             "best_val_pairwise_acc": best["val_pairwise_acc"], "steps": step,
             "config": asdict(cfg)}
+
+
+# ---------- cross-validation: one fold at a time (conditions D and E) ----------
+
+def splits_from_csv(path) -> list:
+    """The project-level splits saved by scripts/make_folds.py (results/folds.csv), one per test fold."""
+    from insight import folds
+
+    df = pd.read_csv(path)
+    out = []
+    for f, g in df.groupby("fold", sort=True):
+        out.append(folds.Split(fold=int(f), train=g.query_id[g.role == "train"].tolist(),
+                               val=g.query_id[g.role == "val"].tolist(),
+                               test=g.query_id[g.role == "test"].tolist()))
+    return out
+
+
+def score_texts(reranker, queries: list[str], docs: list[str], batch_size: int) -> np.ndarray:
+    """Scores for (queries[i], docs[i]) with the reranker's current weights (adapters included)."""
+    ids = [reranker.token_ids(q, d) for q, d in zip(queries, docs)]
+    return score_ids(reranker, ids, batch_size)
+
+
+def score_test_fold(reranker, table: pd.DataFrame, test_q: list[str], question_of: dict, text_of: dict,
+                    shortlist: pd.DataFrame | None, depth: int = 100, top_k: int = 100,
+                    batch_size: int = 32):
+    """Held-out scores for one fold's test questions, after training is finished.
+
+    Returns (run_df, pairs): the reranked shortlist of the test questions (empty if shortlist is
+    None) and every labeled (test question, credited or rejected paper) pair with its score.
+    The test labels are read here only to list which pairs to score and to attach the label
+    column for evaluation; the scores themselves never depend on them (a test checks this).
+    """
+    from insight import rerank as R
+
+    def fn(qs, ds):
+        return score_texts(reranker, qs, ds, batch_size)
+
+    if shortlist is not None:
+        sl = shortlist[shortlist.query_id.isin(set(test_q))]
+        run_df = R.rerank_run(sl, question_of, text_of, fn, depth, top_k)
+    else:
+        run_df = pd.DataFrame(columns=["query_id", "rank", "doc_id", "score", "first_rank"])
+    pairs = R.labeled_pairs(table, test_q)
+    pairs["score"] = fn(pairs.query_id.map(question_of).tolist(), pairs.doc_id.map(text_of).tolist()) \
+        if len(pairs) else []
+    return run_df, pairs
+
+
+def subsample(pairs: pd.DataFrame, val: pd.DataFrame, max_pairs: int | None, max_val_queries: int | None,
+              seed: int = 0):
+    """Seeded subsets for CPU smoke tests: at most max_pairs training pairs and max_val_queries
+    validation questions. None keeps everything (the real runs)."""
+    if max_pairs is not None and len(pairs) > max_pairs:
+        pairs = pairs.sample(n=max_pairs, random_state=seed).reset_index(drop=True)
+    if max_val_queries is not None:
+        keep = list(dict.fromkeys(val.query_id))[:max_val_queries]
+        val = val[val.query_id.isin(keep)].reset_index(drop=True)
+    return pairs, val
+
+
+def run_fold(reranker, table: pd.DataFrame, split, question_of: dict, text_of: dict,
+             cfg: TrainConfig = TrainConfig(), shortlist: pd.DataFrame | None = None,
+             depth: int = 100, top_k: int = 100, max_pairs: int | None = None,
+             max_val_queries: int | None = None, test_limit: int | None = None, log=print) -> dict:
+    """Train on one fold's training questions, early-stop on its validation questions, then score
+    its test questions with the best adapters.
+
+    The training step only sees fold_pairs(table, split, cfg), which reads train and validation
+    rows. Test questions are scored on every kind (core and subfield) even when cfg.kinds
+    restricts training (the core-only ablation), so all conditions are evaluated on the same
+    questions. Returns {"train": train() output, "run": run_df, "pairs": pairs}, with a `fold`
+    column added to every table.
+    """
+    pairs, val = fold_pairs(table, split, cfg)
+    pairs, val = subsample(pairs, val, max_pairs, max_val_queries, cfg.seed)
+    log(f"fold {split.fold}: {len(pairs)} training pairs, {val.query_id.nunique()} validation questions "
+        f"({len(val)} labeled papers), {len(split.test)} test questions")
+    out = train(reranker, pairs, val if len(val) else None, question_of, text_of, cfg, log=log)
+    test_q = list(split.test)[:test_limit] if test_limit is not None else list(split.test)
+    run_df, test_pairs = score_test_fold(reranker, table, test_q, question_of, text_of, shortlist,
+                                         depth, top_k, cfg.eval_batch_size)
+    out["history"] = out["history"].assign(fold=split.fold)
+    return {"train": out, "run": run_df.assign(fold=split.fold), "pairs": test_pairs.assign(fold=split.fold),
+            "n_train_pairs": len(pairs), "n_val_questions": int(val.query_id.nunique())}

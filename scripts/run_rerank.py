@@ -23,19 +23,7 @@ import yaml
 
 from insight import data, metrics, retrieve_bm25, rerank as R
 
-COLS = ["ndcg@20", "recall@5", "recall@20", "recall@100", "mrr", "pairwise_acc"]
-
-
-def per_question(run_df: pd.DataFrame, pairs: pd.DataFrame, table: pd.DataFrame, qids) -> pd.DataFrame:
-    """Ranking metrics from run_df plus pairwise accuracy from the labeled-pair scores."""
-    per_q = metrics.evaluate(retrieve_bm25.as_ranked_lists(run_df), table.positives.loc[qids].to_dict())
-    acc = {}
-    for qid, g in pairs.groupby("query_id"):
-        s = dict(zip(g.doc_id, g.score))
-        acc[qid] = metrics.pairwise_accuracy(s, g.doc_id[g.label == 1], g.doc_id[g.label == 0])
-    per_q["pairwise_acc"] = pd.Series(acc).reindex(per_q.index)
-    per_q.insert(0, "kind", table.kind.loc[per_q.index])
-    return per_q
+COLS = R.METRIC_COLS
 
 
 def main():
@@ -93,7 +81,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     run_df.to_parquet(out / f"run_{args.tag}.parquet", index=False)
     pairs.to_parquet(out / f"pairs_{args.tag}.parquet", index=False)
-    per_q = per_question(run_df, pairs, table, qids)
+    per_q = R.per_question(run_df, pairs, table, qids)
     per_q.to_csv(out / f"metrics_{args.tag}.csv")
     print(f"wrote {out}/run_{args.tag}.parquet, pairs_{args.tag}.parquet, metrics_{args.tag}.csv")
 

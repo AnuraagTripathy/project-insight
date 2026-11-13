@@ -252,3 +252,100 @@ def test_gradient_checkpointing_gives_the_same_training():
                             lora_dropout=0.0, eval_every=1, patience=100, gradient_checkpointing=gc)
         outs.append(T.train(rr, pairs, val, qo, to, cfg, log=lambda *_: None)["history"])
     assert np.allclose(outs[0].train_loss.fillna(0), outs[1].train_loss.fillna(0), atol=1e-5)
+
+
+# ---------- cross-validation runner (conditions D and E) ----------
+
+def _cv_toy():
+    """Six questions in three projects-worth of splits, with a shortlist of 4 papers each."""
+    words = ["alpha", "beta", "gamma", "delta", "omega", "sigma"]
+    docs = [f"d{i}" for i in range(12)]
+    text_of = {d: f"{words[i % 6]} {words[(i * 5) % 6]} {i}" for i, d in enumerate(docs)}
+    qs = [f"q{i}" for i in range(6)]
+    question_of = {q: f"question {q}" for q in qs}
+    table = pd.DataFrame({
+        "kind": ["core", "subfield"] * 3,
+        "question": [question_of[q] for q in qs],
+        "positives": [[docs[i]] for i in range(6)],
+        "negatives": [[docs[i + 6], docs[(i + 7) % 12]] for i in range(6)],
+    }, index=qs)
+    sl = pd.DataFrame([(q, r + 1, docs[(i + r * 3) % 12], 0.0) for i, q in enumerate(qs) for r in range(4)],
+                      columns=["query_id", "rank", "doc_id", "score"])
+    split = folds.Split(fold=2, train=["q0", "q1", "q2"], val=["q3"], test=["q4", "q5"])
+    return table, split, question_of, text_of, sl
+
+
+def test_run_fold_scores_only_test_questions():
+    table, split, qo, to, sl = _cv_toy()
+    cfg = T.TrainConfig(epochs=1, batch_pairs=2, grad_accum=1, lr=1e-2, lora_dropout=0.0)
+    res = T.run_fold(TinyReranker(), table, split, qo, to, cfg, sl, depth=4, top_k=3, log=lambda *_: None)
+    run, pairs = res["run"], res["pairs"]
+    assert set(run.query_id) == set(pairs.query_id) == {"q4", "q5"}
+    assert (run.fold == 2).all() and (pairs.fold == 2).all() and (res["train"]["history"].fold == 2).all()
+    assert run.groupby("query_id")["rank"].apply(list).tolist() == [[1, 2, 3], [1, 2, 3]]
+    assert set(zip(pairs.query_id, pairs.doc_id, pairs.label)) == {
+        ("q4", "d4", 1), ("q4", "d10", 0), ("q4", "d11", 0), ("q5", "d5", 1), ("q5", "d11", 0), ("q5", "d0", 0)}
+    assert res["n_train_pairs"] == 3 * 2 and res["n_val_questions"] == 1
+
+
+def test_run_fold_held_out_scores_do_not_depend_on_test_labels():
+    table, split, qo, to, sl = _cv_toy()
+    cfg = T.TrainConfig(epochs=2, batch_pairs=2, grad_accum=1, lr=1e-2, lora_dropout=0.0)
+    a = T.run_fold(TinyReranker(), table, split, qo, to, cfg, sl, depth=4, log=lambda *_: None)
+    flipped = table.copy()
+    for q in split.test:  # swap the test questions' credited and rejected papers
+        flipped.at[q, "positives"], flipped.at[q, "negatives"] = table.at[q, "negatives"], table.at[q, "positives"]
+    b = T.run_fold(TinyReranker(), flipped, split, qo, to, cfg, sl, depth=4, log=lambda *_: None)
+    assert a["train"]["history"].equals(b["train"]["history"])
+    assert a["run"].equals(b["run"])
+    sa = a["pairs"].set_index(["query_id", "doc_id"]).score
+    sb = b["pairs"].set_index(["query_id", "doc_id"]).score
+    assert np.allclose(sa.sort_index(), sb.sort_index())
+
+
+def test_run_fold_core_only_trains_on_core_but_tests_everything():
+    table, split, qo, to, sl = _cv_toy()
+    cfg = T.TrainConfig(epochs=1, batch_pairs=2, grad_accum=1, kinds=["core"], lora_dropout=0.0)
+    res = T.run_fold(TinyReranker(), table, split, qo, to, cfg, sl, depth=4, log=lambda *_: None)
+    assert res["n_train_pairs"] == 2 * 2  # q0 and q2 are core
+    assert set(res["pairs"].query_id) == {"q4", "q5"}  # q5 is subfield and still tested
+
+
+def test_run_fold_without_shortlist_and_subsampling():
+    table, split, qo, to, _ = _cv_toy()
+    cfg = T.TrainConfig(epochs=1, batch_pairs=2, grad_accum=1, lora_dropout=0.0)
+    res = T.run_fold(TinyReranker(), table, split, qo, to, cfg, None, max_pairs=4, test_limit=1,
+                     log=lambda *_: None)
+    assert res["run"].empty and set(res["pairs"].query_id) == {"q4"} and res["n_train_pairs"] == 4
+
+
+def test_splits_from_csv_match_folds_module():
+    path = data.ROOT / "results" / "folds.csv"
+    splits = T.splits_from_csv(path)
+    assert [s.fold for s in splits] == [0, 1, 2, 3, 4]
+    all_test = [q for s in splits for q in s.test]
+    assert len(all_test) == len(set(all_test)) == 894  # every question held out exactly once
+    for s in splits:
+        assert not set(s.test) & (set(s.train) | set(s.val)) and not set(s.train) & set(s.val)
+
+
+@needs_data
+def test_splits_from_csv_equal_recomputed_splits():
+    ds = data.load()
+    cfg = folds.FoldConfig.from_yaml(data.ROOT / "configs" / "folds.yaml")
+    for s in T.splits_from_csv(data.ROOT / "results" / "folds.csv"):
+        r = folds.split(ds.queries, s.fold, cfg)
+        assert (set(s.train), set(s.val), set(s.test)) == (set(r.train), set(r.val), set(r.test))
+
+
+def test_condition_D_config_matches_C_except_training():
+    import yaml
+
+    c = yaml.safe_load((data.ROOT / "configs" / "C.yaml").read_text())
+    d = yaml.safe_load((data.ROOT / "configs" / "D.yaml").read_text())
+    assert c["rerank"] == d["rerank"]  # same model, instruction, paper text, depth
+    assert c["shortlist"] == d["shortlist"] and c["data_config"] == d["data_config"]
+    t = T.TrainConfig(**d["train"])
+    assert (t.lora_r, t.lora_alpha, t.lora_dropout, t.epochs) == (16, 32, 0.05, 3)
+    assert t.kinds == ["core", "subfield"] and t.max_pairs_per_query is None
+    assert 1e-4 <= t.lr <= 2e-4

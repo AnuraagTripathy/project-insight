@@ -1,0 +1,42 @@
+# Condition D: condition C's reranker (same model, instruction, paper text and shortlist) plus
+# LoRA adapters trained on (question, credited, author-rejected) pairs of the training folds.
+# The only difference from C is training. Read by scripts/train_rerankers.py.
+rerank:
+  model: Qwen/Qwen3-Reranker-0.6B
+  # Must stay identical to configs/C.yaml, so C vs D isolates training (a test checks this).
+  instruction: "Given a research question, judge whether the paper could inspire the research: its scientific contribution would meaningfully inform how a researcher thinks about or approaches the question, rather than being merely topically related"
+  fields: [title, text]
+  field_sep: "\n"
+  max_length: 8192
+  batch_size: 16
+  dtype: bfloat16
+  attn_implementation: sdpa
+  depth: 100
+  top_k: 100
+# insight.train_reranker.TrainConfig; the defaults are in the decision log (Nov 11). Written out
+# in full so the run's settings are on record.
+train:
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  lr: 1.0e-4
+  weight_decay: 0.0
+  warmup_frac: 0.05
+  epochs: 3
+  batch_pairs: 8
+  grad_accum: 4
+  max_grad_norm: 1.0
+  gradient_checkpointing: false
+  eval_every: null  # once per epoch
+  patience: 2
+  eval_batch_size: 32
+  max_pairs_per_query: null  # every credited x rejected pair
+  kinds: [core, subfield]  # [core] is the ablation (Fri Nov 20)
+  seed: 0
+shortlist: results/shortlist_B.parquet
+folds: results/folds.csv
+data_config: configs/data.yaml
+tag: D
+# Per-fold adapters, histories and held-out scores (large or intermediate, gitignored).
+work_dir: outputs/D

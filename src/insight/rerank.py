@@ -188,3 +188,25 @@ def labeled_pairs(table: pd.DataFrame, query_ids) -> pd.DataFrame:
         r = table.loc[qid]
         rows += [(qid, d, 1) for d in r.positives] + [(qid, d, 0) for d in r.negatives]
     return pd.DataFrame(rows, columns=["query_id", "doc_id", "label"])
+
+
+METRIC_COLS = ["ndcg@20", "recall@5", "recall@20", "recall@100", "mrr", "pairwise_acc"]
+
+
+def per_question(run_df: pd.DataFrame, pairs: pd.DataFrame, table: pd.DataFrame, qids) -> pd.DataFrame:
+    """One row per question: ranking metrics from run_df plus pairwise accuracy from pair scores.
+
+    run_df: long table (query_id, rank, doc_id, ...); pairs: (query_id, doc_id, label, score).
+    Either may be empty: a question missing from run_df scores 0 (insight.metrics convention)
+    and pairwise accuracy is NaN where a question has no scored pairs.
+    """
+    from insight import metrics, retrieve_bm25
+
+    per_q = metrics.evaluate(retrieve_bm25.as_ranked_lists(run_df), table.positives.loc[list(qids)].to_dict())
+    acc = {}
+    for qid, g in pairs.groupby("query_id"):
+        s = dict(zip(g.doc_id, g.score))
+        acc[qid] = metrics.pairwise_accuracy(s, g.doc_id[g.label == 1], g.doc_id[g.label == 0])
+    per_q["pairwise_acc"] = pd.Series(acc, dtype=float).reindex(per_q.index)
+    per_q.insert(0, "kind", table.kind.loc[per_q.index])
+    return per_q
