@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -349,3 +350,94 @@ def test_condition_D_config_matches_C_except_training():
     assert (t.lora_r, t.lora_alpha, t.lora_dropout, t.epochs) == (16, 32, 0.05, 3)
     assert t.kinds == ["core", "subfield"] and t.max_pairs_per_query is None
     assert 1e-4 <= t.lr <= 2e-4
+
+
+# ---------- condition E: mined negatives ----------
+
+def _mine_toy():
+    table = pd.DataFrame({
+        "kind": ["core", "subfield", "core"],
+        "paper_id": ["P", "P", "Q"],
+        "question": ["a", "b", "c"],
+        "positives": [["p0"], ["p1"], ["p2"]],
+        "negatives": [["n0"], ["n1"], ["n2"]],
+    }, index=["qa", "qb", "qc"])
+    # qa's shortlist: ranks 1..6; p1 is credited for qb (same project), n0 is rejected for qa itself
+    docs = ["x1", "x2", "p1", "n0", "x5", "x6"]
+    sl = pd.DataFrame([("qa", r + 1, d, 0.0) for r, d in enumerate(docs)] +
+                      [("qc", r + 1, d, 0.0) for r, d in enumerate(["p1", "y2", "y3"])],
+                      columns=["query_id", "rank", "doc_id", "score"])
+    return table, sl
+
+
+def test_mined_negatives_rank_range_and_exclusions():
+    table, sl = _mine_toy()
+    cfg = T.TrainConfig(mine_ranks=[2, 6], mine_per_query=None)
+    m = T.mined_negatives(table, sl, ["qa"], cfg)
+    assert m.doc_id.tolist() == ["x2", "x5", "x6"]  # x1 is rank 1; p1 is a project positive; n0 is labeled
+    assert m["rank"].tolist() == [2, 5, 6]
+    m2 = T.mined_negatives(table, sl, ["qa"], replace(cfg, mine_exclude_project_positives=False))
+    assert m2.doc_id.tolist() == ["x2", "p1", "x5", "x6"]  # p1 is unlabeled for qa itself
+    # qc is in another project, so p1 (credited for qb) may be mined for it
+    assert T.mined_negatives(table, sl, ["qc"], replace(cfg, mine_ranks=[1, 3])).doc_id.tolist() == ["p1", "y2", "y3"]
+
+
+def test_mined_negatives_sampling_is_seeded_and_capped():
+    table, sl = _mine_toy()
+    cfg = T.TrainConfig(mine_ranks=[1, 6], mine_per_query=2, seed=3)
+    a = T.mined_negatives(table, sl, ["qa"], cfg)
+    assert len(a) == 2 and a.equals(T.mined_negatives(table, sl, ["qa"], cfg))
+    assert set(a.doc_id) <= {"x1", "x2", "x5", "x6"}
+
+
+def test_mined_pairs_weight_and_source():
+    table, sl = _mine_toy()
+    m = T.mined_negatives(table, sl, ["qa"], T.TrainConfig(mine_ranks=[2, 6], mine_per_query=None))
+    p = T.mined_pairs(table, m, 0.3)
+    assert set(zip(p.pos_id, p.neg_id)) == {("p0", "x2"), ("p0", "x5"), ("p0", "x6")}
+    assert (p.weight == 0.3).all() and (p.source == "mined").all()
+
+
+def test_fold_pairs_with_mining_reads_only_training_shortlist():
+    table, split, qo, to, sl = _cv_toy()
+    cfg = T.TrainConfig(mine_ranks=[1, 4], mine_per_query=None)
+    pairs, val = T.fold_pairs(table, split, cfg, sl)
+    author = pairs[pairs.source == "author"]
+    mined = pairs[pairs.source == "mined"]
+    assert len(author) == 3 * 2 and (author.weight == 1.0).all()
+    assert set(mined.query_id) <= set(split.train) and (mined.weight == 0.3).all()
+    for q, g in mined.groupby("query_id"):  # never a paper labeled for that question
+        assert not set(g.neg_id) & (set(table.at[q, "positives"]) | set(table.at[q, "negatives"]))
+    # dropping the shortlist rows of validation and test questions changes nothing
+    pairs2, val2 = T.fold_pairs(table, split, cfg, sl[sl.query_id.isin(split.train)])
+    assert pairs.equals(pairs2) and val.equals(val2)
+    # validation stays on author labels only
+    assert set(val.query_id) == set(split.val) and len(val) == 1 + 2
+    with pytest.raises(ValueError):
+        T.fold_pairs(table, split, cfg, None)
+
+
+def test_run_fold_with_mining_trains_and_reports_mined_count():
+    table, split, qo, to, sl = _cv_toy()
+    cfg = T.TrainConfig(epochs=1, batch_pairs=2, grad_accum=1, lora_dropout=0.0, mine_ranks=[1, 4],
+                        mine_per_query=1)
+    res = T.run_fold(TinyReranker(), table, split, qo, to, cfg, sl, depth=4, log=lambda *_: None)
+    assert res["n_train_pairs"] == 6 + res["n_mined_pairs"] and 0 < res["n_mined_pairs"] <= 3
+    assert set(res["pairs"].query_id) == {"q4", "q5"}
+
+
+def test_condition_E_and_ablation_configs_change_one_thing_from_D():
+    import yaml
+
+    d = yaml.safe_load((data.ROOT / "configs" / "D.yaml").read_text())
+    e = yaml.safe_load((data.ROOT / "configs" / "E.yaml").read_text())
+    dc = yaml.safe_load((data.ROOT / "configs" / "D_core.yaml").read_text())
+    shared = ["rerank", "shortlist", "folds", "data_config"]
+    assert all(e[k] == d[k] == dc[k] for k in shared)
+    te, td, tc = T.TrainConfig(**e["train"]), T.TrainConfig(**d["train"]), T.TrainConfig(**dc["train"])
+    assert td.mine_ranks is None and tc.mine_ranks is None
+    assert replace(te, mine_ranks=None, mine_weight=td.mine_weight, mine_per_query=td.mine_per_query,
+                   mine_exclude_project_positives=td.mine_exclude_project_positives) == td
+    assert te.mine_ranks == [30, 100] and te.mine_weight == 0.3
+    assert replace(tc, kinds=td.kinds) == td and tc.kinds == ["core"]
+    assert len({d["tag"], e["tag"], dc["tag"]}) == 3 and len({d["work_dir"], e["work_dir"], dc["work_dir"]}) == 3

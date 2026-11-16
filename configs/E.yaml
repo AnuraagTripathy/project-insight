@@ -1,0 +1,44 @@
+# Condition E: condition D plus mined negatives. Shortlist papers at ranks 30 to 100 of a training
+# question that the authors never labeled are treated as "no" at loss weight 0.3 (decision log,
+# Nov 16). Everything else (reranker, instruction, shortlist, folds, validation on author labels,
+# optimizer) is identical to configs/D.yaml (a test checks this), so D vs E isolates the mined data.
+rerank:
+  model: Qwen/Qwen3-Reranker-0.6B
+  instruction: "Given a research question, judge whether the paper could inspire the research: its scientific contribution would meaningfully inform how a researcher thinks about or approaches the question, rather than being merely topically related"
+  fields: [title, text]
+  field_sep: "\n"
+  max_length: 8192
+  batch_size: 16
+  dtype: bfloat16
+  attn_implementation: sdpa
+  depth: 100
+  top_k: 100
+train:
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  lr: 1.0e-4
+  weight_decay: 0.0
+  warmup_frac: 0.05
+  epochs: 3
+  batch_pairs: 8
+  grad_accum: 4
+  max_grad_norm: 1.0
+  gradient_checkpointing: false
+  eval_every: null
+  patience: 2
+  eval_batch_size: 32
+  max_pairs_per_query: null
+  kinds: [core, subfield]
+  seed: 0
+  # The only difference from D: mined negatives from the shortlist.
+  mine_ranks: [30, 100]  # inclusive, 1-based ranks of the shortlist
+  mine_weight: 0.3  # author pairs weigh 1
+  mine_per_query: 10  # seeded sample of unlabeled papers per question, each paired with every credited paper
+  mine_exclude_project_positives: true  # skip papers credited for any question of the same project
+shortlist: results/shortlist_B.parquet
+folds: results/folds.csv
+data_config: configs/data.yaml
+tag: E
+work_dir: outputs/E

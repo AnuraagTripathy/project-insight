@@ -19,6 +19,12 @@ validation questions is computed (insight.metrics.pairwise_accuracy, ties count 
 adapter weights from the best evaluation are kept, and training stops after `patience`
 evaluations without improvement.
 
+Condition E adds mined negatives: papers at ranks `mine_ranks` (default 30 to 100) of a training
+question's first-stage shortlist that the authors never labeled for that question. They are
+treated as "no" and paired with each credited paper of the question at weight `mine_weight`
+(default 0.3), since some of them are really inspirations (positive-unlabeled data). The shortlist
+is built without labels, so reading it for training questions leaks nothing.
+
 Leakage: `fold_pairs` reads only the train and validation questions of a split, never the test
 fold's labels; a test checks its output does not change when the test rows are removed.
 """
@@ -60,6 +66,11 @@ class TrainConfig:
     max_pairs_per_query: int | None = None  # None = every credited x rejected pair
     kinds: list[str] = field(default_factory=lambda: ["core", "subfield"])  # ablation: ["core"]
     seed: int = 0
+    # Mined negatives (condition E). mine_ranks None = no mining (condition D).
+    mine_ranks: list[int] | None = None  # [first, last] shortlist rank, inclusive, 1-based
+    mine_weight: float = 0.3  # loss weight of a mined pair (author pairs weigh 1)
+    mine_per_query: int | None = 10  # seeded sample of mined papers per question; None = all in range
+    mine_exclude_project_positives: bool = True  # never mine a paper credited for any question of the project
 
     @classmethod
     def from_yaml(cls, path):
@@ -97,15 +108,66 @@ def build_pairs(table: pd.DataFrame, query_ids, max_per_query: int | None = None
         rows += qp
     df = pd.DataFrame(rows, columns=["query_id", "pos_id", "neg_id"])
     df["weight"] = 1.0
+    df["source"] = "author"
     return df
 
 
-def fold_pairs(table: pd.DataFrame, split, cfg: TrainConfig = TrainConfig()):
+def mined_negatives(table: pd.DataFrame, shortlist: pd.DataFrame, query_ids, cfg: TrainConfig) -> pd.DataFrame:
+    """Unlabeled shortlist papers at ranks cfg.mine_ranks of each given question, as "no" papers.
+
+    A paper is skipped if it is credited or rejected for that question, or (with
+    cfg.mine_exclude_project_positives) credited for any question of the same project in
+    `table` (column paper_id; projects share credited papers across their questions).
+    With cfg.mine_per_query, a seeded random subset of each question's candidates is kept.
+    Returns columns query_id, doc_id, rank.
+    """
+    lo, hi = cfg.mine_ranks
+    rng = np.random.default_rng(cfg.seed)
+    qset = list(dict.fromkeys(query_ids))
+    sl = shortlist[shortlist.query_id.isin(set(qset)) & shortlist["rank"].between(lo, hi)]
+    by_q = {q: g.sort_values("rank") for q, g in sl.groupby("query_id", sort=False)}
+    project_pos = {}
+    if cfg.mine_exclude_project_positives and "paper_id" in table:
+        for pid, g in table.groupby("paper_id"):
+            project_pos[pid] = {d for ps in g.positives for d in ps}
+    rows = []
+    for q in qset:
+        if q not in by_q:
+            continue
+        r = table.loc[q]
+        skip = set(r.positives) | set(r.negatives)
+        if cfg.mine_exclude_project_positives:
+            skip |= project_pos.get(r.paper_id, set()) if "paper_id" in table else set()
+        g = by_q[q]
+        cand = [(d, int(k)) for d, k in zip(g.doc_id, g["rank"]) if d not in skip]
+        if cfg.mine_per_query is not None and len(cand) > cfg.mine_per_query:
+            keep = np.sort(rng.choice(len(cand), size=cfg.mine_per_query, replace=False))
+            cand = [cand[i] for i in keep]
+        rows += [(q, d, k) for d, k in cand]
+    return pd.DataFrame(rows, columns=["query_id", "doc_id", "rank"])
+
+
+def mined_pairs(table: pd.DataFrame, mined: pd.DataFrame, weight: float) -> pd.DataFrame:
+    """Each credited paper of a question paired with each of its mined negatives, at `weight`."""
+    rows = [(q, p, n) for q, g in mined.groupby("query_id", sort=False)
+            for p in table.at[q, "positives"] for n in g.doc_id]
+    df = pd.DataFrame(rows, columns=["query_id", "pos_id", "neg_id"])
+    df["weight"] = float(weight)
+    df["source"] = "mined"
+    return df
+
+
+def fold_pairs(table: pd.DataFrame, split, cfg: TrainConfig = TrainConfig(),
+               shortlist: pd.DataFrame | None = None):
     """Training pairs and validation labels for one fold, read from train and val questions only.
 
     split: an insight.folds.Split. Questions are restricted to cfg.kinds (the core-only
     ablation drops subfield questions from training and validation alike).
-    Returns (train_pairs, val_labels) where val_labels has columns query_id, doc_id, label.
+    shortlist: needed only when cfg.mine_ranks is set (condition E); only the training
+    questions' rows are read. Validation stays on author labels in every condition, so D and E
+    early-stop on the same criterion.
+    Returns (train_pairs, val_labels): train_pairs has columns query_id, pos_id, neg_id, weight,
+    source ("author" or "mined"); val_labels has columns query_id, doc_id, label.
     """
     test = set(split.test)
     assert not test & set(split.train) and not test & set(split.val), "test question in train or val"
@@ -114,6 +176,12 @@ def fold_pairs(table: pd.DataFrame, split, cfg: TrainConfig = TrainConfig()):
     train_q = [q for q in split.train if sub.at[q, "kind"] in kinds]
     val_q = [q for q in split.val if sub.at[q, "kind"] in kinds]
     pairs = build_pairs(sub, train_q, cfg.max_pairs_per_query, cfg.seed)
+    if cfg.mine_ranks is not None:
+        if shortlist is None:
+            raise ValueError("mine_ranks is set (condition E) but no shortlist was given to mine from")
+        # Project positives are looked up among training rows only (a project is never split).
+        mined = mined_negatives(table.loc[list(split.train)], shortlist, train_q, cfg)
+        pairs = pd.concat([pairs, mined_pairs(sub, mined, cfg.mine_weight)], ignore_index=True)
     rows = []
     for q in val_q:
         r = sub.loc[q]
@@ -350,9 +418,11 @@ def run_fold(reranker, table: pd.DataFrame, split, question_of: dict, text_of: d
     questions. Returns {"train": train() output, "run": run_df, "pairs": pairs}, with a `fold`
     column added to every table.
     """
-    pairs, val = fold_pairs(table, split, cfg)
+    pairs, val = fold_pairs(table, split, cfg, shortlist)
     pairs, val = subsample(pairs, val, max_pairs, max_val_queries, cfg.seed)
-    log(f"fold {split.fold}: {len(pairs)} training pairs, {val.query_id.nunique()} validation questions "
+    n_mined = int((pairs.source == "mined").sum())
+    log(f"fold {split.fold}: {len(pairs)} training pairs ({n_mined} mined), "
+        f"{val.query_id.nunique()} validation questions "
         f"({len(val)} labeled papers), {len(split.test)} test questions")
     out = train(reranker, pairs, val if len(val) else None, question_of, text_of, cfg, log=log)
     test_q = list(split.test)[:test_limit] if test_limit is not None else list(split.test)
@@ -360,4 +430,5 @@ def run_fold(reranker, table: pd.DataFrame, split, question_of: dict, text_of: d
                                          depth, top_k, cfg.eval_batch_size)
     out["history"] = out["history"].assign(fold=split.fold)
     return {"train": out, "run": run_df.assign(fold=split.fold), "pairs": test_pairs.assign(fold=split.fold),
-            "n_train_pairs": len(pairs), "n_val_questions": int(val.query_id.nunique())}
+            "n_train_pairs": len(pairs), "n_mined_pairs": n_mined,
+            "n_val_questions": int(val.query_id.nunique())}

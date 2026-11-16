@@ -1,4 +1,4 @@
-"""Conditions D and E: train one LoRA reranker per fold and score that fold's held-out questions.
+"""Conditions D and E (and the core-only ablation): train one LoRA reranker per fold and score that fold's held-out questions.
 
 For each test fold f (folds from results/folds.csv, the same splits every condition uses):
 1. Build training pairs from fold f's training questions and validation labels from its inner
@@ -13,6 +13,7 @@ results/run_<tag>.parquet, pairs_<tag>.parquet, metrics_<tag>.csv and train_hist
 and prints core and subfield means.
 
 Full run (H100): uv run python scripts/train_rerankers.py --config configs/D.yaml
+    (configs/E.yaml for mined negatives, configs/D_core.yaml for the core-only ablation)
 Resume after an interruption: add --resume (finished folds are reused; a fold whose adapter
 exists but whose held-out scores do not, for example because the shortlist was missing, is
 rescored from the saved adapter without retraining).
@@ -94,6 +95,9 @@ def main():
 
     sl_path = data.ROOT / (args.shortlist or raw["shortlist"])
     shortlist = pd.read_parquet(sl_path) if sl_path.exists() else None
+    if shortlist is None and tcfg.mine_ranks is not None:
+        raise SystemExit(f"{sl_path} not found: condition {tag} mines negatives from the shortlist, so it "
+                         f"cannot train without it (H100 queue item 1 writes it)")
     if shortlist is None:
         print(f"WARNING: {sl_path} not found: training and labeled-pair scores only, no reranked run. "
               f"Rerun with --resume once it exists to rescore from the saved adapters.")
@@ -124,7 +128,8 @@ def main():
             rr.model.save_pretrained(str(adapter))
             res["train"]["history"].to_csv(fdir / "history.csv", index=False)
             info = {k: res["train"][k] for k in ["best_step", "best_val_pairwise_acc", "steps"]}
-            info.update(n_train_pairs=res["n_train_pairs"], n_val_questions=res["n_val_questions"],
+            info.update(n_train_pairs=res["n_train_pairs"], n_mined_pairs=res["n_mined_pairs"],
+                        n_val_questions=res["n_val_questions"],
                         train_config=asdict(tcfg), rerank_config=asdict(rcfg), smoke=smoke)
             (fdir / "summary.json").write_text(json.dumps(info, indent=2))
             run_df, pairs = res["run"], res["pairs"]
