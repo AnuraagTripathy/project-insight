@@ -94,6 +94,11 @@ class Encoder:
             kwargs["attn_implementation"] = cfg.attn_implementation
         self.model = AutoModel.from_pretrained(cfg.model, **kwargs).to(self.device).eval()
 
+    def tokenize(self, texts: list[str], max_length: int):
+        """Left-padded, truncated model inputs on the encoder's device."""
+        return self.tokenizer(texts, padding=True, truncation=True, max_length=max_length,
+                              return_tensors="pt").to(self.device)
+
     def encode(self, texts: list[str], max_length: int, batch_size: int | None = None,
                show_progress: bool = False) -> np.ndarray:
         """Embed texts in batches of similar length (sorted), returned in the input order."""
@@ -109,8 +114,7 @@ class Encoder:
         with torch.inference_mode():
             for start in it:
                 idx = order[start:start + bs]
-                batch = self.tokenizer([texts[i] for i in idx], padding=True, truncation=True,
-                                       max_length=max_length, return_tensors="pt").to(self.device)
+                batch = self.tokenize([texts[i] for i in idx], max_length)
                 hidden = self.model(**batch).last_hidden_state
                 emb = torch.nn.functional.normalize(last_token_pool(hidden, batch["attention_mask"]), p=2, dim=1)
                 emb = emb.float().cpu().numpy()
