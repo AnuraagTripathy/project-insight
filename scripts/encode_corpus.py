@@ -20,7 +20,6 @@ import time
 from dataclasses import replace
 
 import numpy as np
-import pandas as pd
 import yaml
 
 from insight import data, metrics, retrieve_bm25, retrieve_dense as R
@@ -79,17 +78,7 @@ def main():
             "corpus_ids_first_last": [corpus.id.iloc[0], corpus.id.iloc[-1]]}, indent=1))
 
     table = ds.table
-    pos_of = pd.Series(np.arange(len(corpus)), index=corpus.id)
-    pub = corpus.pub.to_numpy()
-
-    def mask(qid):
-        if not dcfg.date_filter:
-            return None
-        row = table.loc[qid]
-        labeled = pos_of.reindex(list(row.positives) + list(row.negatives)).dropna().astype(int)
-        return data.candidate_mask(pub, row.src_pub, labeled.to_numpy(),
-                                   exempt_labeled=dcfg.date_filter_exempt_labeled,
-                                   keep_undated=dcfg.keep_undated)
+    mask = data.mask_fn(corpus, table, dcfg)
 
     t0 = time.time()
     index = R.DenseIndex(doc_emb, corpus.id)

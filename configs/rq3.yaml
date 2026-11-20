@@ -1,0 +1,62 @@
+# RQ3: fine-tune Qwen3-Embedding-0.6B per fold with InfoNCE on the training folds' author labels,
+# re-encode the whole corpus with each fold's model, and keep the top 100 of that fold's test
+# questions. Read by scripts/train_retrievers.py.
+
+# How each fold's trained model encodes and searches (insight.retrieve_dense.DenseConfig).
+# Same question instruction, paper text, token caps and depth as condition B (configs/B.yaml);
+# a test checks they match. Only the model differs: 0.6B (fine-tuned) instead of frozen 4B.
+dense:
+  model: Qwen/Qwen3-Embedding-0.6B
+  instruction: "Given a scientific research question, retrieve papers that could inspire or contribute to answering the question, including relevant background knowledge, methods, and ideas."
+  fields: [title, text]
+  field_sep: "\n"
+  max_length_query: 512
+  max_length_doc: 1024
+  batch_size: 64
+  dtype: bfloat16
+  attn_implementation: sdpa
+  top_k: 100
+
+# Weights are kept in float32 during training (bf16 autocast for the forward pass); the saved
+# model is then reloaded in dense.dtype for encoding.
+train_dtype: float32
+
+# insight.train_retriever.RetrieverTrainConfig; the defaults are in the decision log (Nov 18).
+# Written out in full so the run's settings are on record.
+train:
+  model: Qwen/Qwen3-Embedding-0.6B
+  instruction: "Given a scientific research question, retrieve papers that could inspire or contribute to answering the question, including relevant background knowledge, methods, and ideas."
+  max_length_query: 512
+  max_length_doc: 1024
+  tau: 0.05
+  hard_negatives: 3
+  mask_project_positives: true
+  lora_r: null  # full fine-tuning; 16 = LoRA rank 16 on the attention projections
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  lr: 1.0e-5
+  weight_decay: 0.01
+  warmup_frac: 0.05
+  epochs: 3
+  batch_size: 32
+  max_grad_norm: 1.0
+  gradient_checkpointing: false
+  autocast: bfloat16
+  eval_every: null  # once per epoch
+  patience: 2
+  val_pool_size: 20000
+  val_k: 100
+  eval_batch_size: 64
+  kinds: [core, subfield]
+  seed: 0
+
+folds: results/folds.csv
+data_config: configs/data.yaml
+tag: rq3
+# Per-fold models, corpus vectors (about 0.8 GB each), histories and runs (gitignored).
+work_dir: outputs/rq3
+# Keep each fold's corpus vectors so --resume can redo the search without re-encoding.
+keep_corpus_emb: true
+# Printed side by side with RQ3 when present (H100 queue item 1, and the optional frozen 0.6B control).
+baselines: [results/metrics_B.csv, results/metrics_B06.csv]

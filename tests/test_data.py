@@ -125,3 +125,11 @@ def test_strict_filter_loses_exactly_the_late_credited_pairs(ds):
     lost = sum((~m[qid][pos_of[list(row.positives)].to_numpy()]).sum()
                for qid, row in ds.table.iterrows())
     assert lost == 27
+
+
+def test_mask_fn_matches_candidate_masks(ds, masks):
+    fn = data.mask_fn(ds.corpus, ds.table, ds.config)
+    for qid in list(ds.table.index[:5]) + list(ds.table.index[-5:]):
+        assert np.array_equal(fn(qid), masks[qid]), qid
+    off = data.mask_fn(ds.corpus, ds.table, data.DataConfig(date_filter=False))
+    assert off(ds.table.index[0]) is None

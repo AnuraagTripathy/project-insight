@@ -151,3 +151,25 @@ def candidate_masks(ds: Dataset) -> dict[str, np.ndarray]:
                                     exempt_labeled=cfg.date_filter_exempt_labeled,
                                     keep_undated=cfg.keep_undated)
     return masks
+
+
+def mask_fn(corpus: pd.DataFrame, table: pd.DataFrame, cfg: DataConfig):
+    """A function query id -> candidate_mask over `corpus` (None when the date filter is off).
+
+    Computes one mask at a time, so it suits searches that visit questions one by one (894
+    full masks at once take about 170 MB). Labeled papers missing from `corpus` (a smoke-test
+    subset) are skipped.
+    """
+    pos_of = pd.Series(np.arange(len(corpus)), index=corpus.id)
+    pub = corpus.pub.to_numpy()
+
+    def fn(qid):
+        if not cfg.date_filter:
+            return None
+        row = table.loc[qid]
+        labeled = pos_of.reindex(list(row.positives) + list(row.negatives)).dropna().astype(int)
+        return candidate_mask(pub, row.src_pub, labeled.to_numpy(),
+                              exempt_labeled=cfg.date_filter_exempt_labeled,
+                              keep_undated=cfg.keep_undated)
+
+    return fn

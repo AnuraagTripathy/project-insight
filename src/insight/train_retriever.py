@@ -44,7 +44,7 @@ import pandas as pd
 import yaml
 
 from insight import metrics
-from insight.retrieve_dense import PAPER_INSTRUCTION, format_query, last_token_pool
+from insight.retrieve_dense import PAPER_INSTRUCTION, DenseIndex, format_query, last_token_pool, run
 
 
 @dataclass
@@ -176,13 +176,18 @@ def embed(encoder, texts: list[str], max_length: int):
     return F.normalize(last_token_pool(hidden, batch["attention_mask"]).float(), p=2, dim=1)
 
 
-def encode_texts(encoder, texts: list[str], max_length: int, batch_size: int) -> np.ndarray:
+def encode_texts(encoder, texts: list[str], max_length: int, batch_size: int,
+                 show_progress: bool = False) -> np.ndarray:
     """Unit vectors for texts without gradients, longest first, returned in input order."""
     torch = encoder.torch
     order = np.argsort([len(t) for t in texts], kind="stable")[::-1]
     out = None
+    it = range(0, len(texts), batch_size)
+    if show_progress:
+        from tqdm.auto import tqdm
+        it = tqdm(it, desc="encode", unit="batch")
     with torch.inference_mode():
-        for start in range(0, len(texts), batch_size):
+        for start in it:
             idx = order[start:start + batch_size]
             e = embed(encoder, [texts[i] for i in idx], max_length).cpu().numpy()
             if out is None:
@@ -375,3 +380,35 @@ def save_encoder(encoder, out_dir):
         model = model.merge_and_unload()
     model.save_pretrained(out_dir)
     encoder.tokenizer.save_pretrained(out_dir)
+
+
+# ---------- per-fold retrieval with a trained encoder ----------
+
+def retrieve_fold(encoder, doc_ids, doc_texts: list[str], query_ids, question_of: dict, mask_fn,
+                  instruction: str, max_length_query: int, max_length_doc: int, k: int = 100,
+                  batch_size: int = 64, doc_emb: np.ndarray | None = None, show_progress: bool = False):
+    """Encode the corpus (unless doc_emb is given) and a fold's test questions, then exact top k.
+
+    The questions use the same "Instruct: ...\nQuery:..." format as training and condition B;
+    mask_fn(query id) gives the date-filter mask over doc_ids (or None). Only the question text,
+    never its labels, goes into the vectors; labels reach the search only through mask_fn's
+    labeled-paper exemption, exactly as in condition B.
+    Returns (run, doc_emb, q_emb), run with columns query_id, rank, doc_id, score.
+    """
+    query_ids = list(query_ids)
+    if doc_emb is None:
+        doc_emb = encode_texts(encoder, doc_texts, max_length_doc, batch_size, show_progress)
+    q_emb = encode_texts(encoder, [format_query(question_of[q], instruction) for q in query_ids],
+                         max_length_query, batch_size)
+    assert len(doc_emb) == len(doc_ids), "corpus vectors do not match the corpus"
+    return run(DenseIndex(doc_emb, doc_ids), query_ids, q_emb, mask_fn, k), doc_emb, q_emb
+
+
+def smoke_corpus(corpus: pd.DataFrame, table: pd.DataFrame, query_ids, n: int) -> pd.DataFrame:
+    """CPU smoke-test subset: the first n corpus papers plus every paper labeled for query_ids,
+    in corpus order (so a smoke run has credited papers to find; its numbers are not results)."""
+    labeled = {d for q in query_ids for d in list(table.at[q, "positives"]) + list(table.at[q, "negatives"])}
+    keep = np.zeros(len(corpus), dtype=bool)
+    keep[:n] = True
+    keep |= corpus.id.isin(labeled).to_numpy()
+    return corpus[keep].reset_index(drop=True)

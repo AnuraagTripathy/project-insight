@@ -265,3 +265,82 @@ def test_real_embedder_one_full_step_lowers_loss_on_its_batch():
     with torch.no_grad():
         l1 = loss()
     assert l1.item() < l0.item()
+
+
+# ---------- per-fold retrieval (Wed Nov 25) ----------
+
+def test_retrieve_fold_scores_only_given_questions_and_respects_masks():
+    table, question_of, text_of = _toy_retrieval()
+    enc = TinyEncoder()
+    doc_ids = sorted(text_of)
+    texts = [text_of[d] for d in doc_ids]
+    blocked = {"p0", "n0"}
+    mask = {q: np.array([d not in blocked for d in doc_ids]) for q in table.index}
+    run_df, doc_emb, q_emb = T.retrieve_fold(enc, doc_ids, texts, ["q0", "q3"], question_of, mask.get,
+                                             "find", 64, 64, k=5, batch_size=4)
+    assert set(run_df.query_id) == {"q0", "q3"} and doc_emb.shape[0] == len(doc_ids) and len(q_emb) == 2
+    assert (run_df.groupby("query_id")["rank"].apply(list) == pd.Series({"q0": [1, 2, 3, 4, 5],
+                                                                         "q3": [1, 2, 3, 4, 5]})).all()
+    assert not run_df.doc_id.isin(blocked).any()
+    assert run_df.groupby("query_id").score.apply(lambda s: s.is_monotonic_decreasing).all()
+    # Passing saved corpus vectors gives the same run without re-encoding the corpus.
+    again, _, _ = T.retrieve_fold(enc, doc_ids, None, ["q0", "q3"], question_of, mask.get, "find", 64, 64,
+                                  k=5, batch_size=4, doc_emb=doc_emb)
+    pd.testing.assert_frame_equal(run_df, again)
+
+
+def test_retrieve_fold_scores_equal_cosine_of_encoded_texts():
+    table, question_of, text_of = _toy_retrieval()
+    enc = TinyEncoder()
+    doc_ids = sorted(text_of)
+    run_df, doc_emb, q_emb = T.retrieve_fold(enc, doc_ids, [text_of[d] for d in doc_ids], ["q1"], question_of,
+                                             None, "find", 64, 64, k=len(doc_ids), batch_size=5)
+    expected = doc_emb @ q_emb[0]
+    got = run_df.set_index("doc_id").score.reindex(doc_ids).to_numpy()
+    assert np.allclose(got, expected, atol=1e-5)
+    assert np.allclose(np.linalg.norm(doc_emb, axis=1), 1.0, atol=1e-5)
+
+
+def test_fold_pipeline_ignores_test_labels():
+    """Train on the training questions, then search for the test questions: the trained model and
+    the held-out run are identical when the test questions' credited and rejected labels change."""
+    table, question_of, text_of = _toy_retrieval()
+    sp = folds.Split(fold=0, train=["q0", "q1", "q2", "q3"], val=["q4"], test=["q5"])
+    corrupted = table.copy()
+    corrupted.at["q5", "positives"], corrupted.at["q5", "negatives"] = ["n5", "p0"], ["p5"]
+    doc_ids = sorted(text_of)
+    cfg = T.RetrieverTrainConfig(epochs=2, batch_size=2, lr=1e-3, max_length_query=64, max_length_doc=64,
+                                 instruction="find", val_k=2)
+    runs = []
+    for t in [table, corrupted]:
+        enc = TinyEncoder()
+        ex, val_q = T.fold_examples(t, sp, cfg)
+        T.train(enc, ex, t, question_of, text_of, cfg, val_q=val_q, pool_ids=doc_ids, log=lambda *_: None)
+        run_df, _, _ = T.retrieve_fold(enc, doc_ids, [text_of[d] for d in doc_ids], sp.test, question_of, None,
+                                       cfg.instruction, 64, 64, k=5, batch_size=4)
+        runs.append(run_df)
+    pd.testing.assert_frame_equal(runs[0], runs[1])
+
+
+def test_smoke_corpus_keeps_labeled_papers_in_corpus_order():
+    table = _toy_table()
+    corpus = pd.DataFrame({"id": [f"o{i}" for i in range(5)] + list("abcdefgxyzw")})
+    sub = T.smoke_corpus(corpus, table, ["q3"], 2)
+    assert sub.id.tolist() == ["o0", "o1", "a", "d", "z"]
+
+
+def test_rq3_config_matches_condition_b_except_the_model():
+    import yaml
+
+    from insight.retrieve_dense import DenseConfig
+
+    rq3, b = DenseConfig.from_yaml("configs/rq3.yaml"), DenseConfig.from_yaml("configs/B.yaml")
+    for f in ["instruction", "fields", "field_sep", "max_length_query", "max_length_doc", "top_k"]:
+        assert getattr(rq3, f) == getattr(b, f), f
+    tr = T.RetrieverTrainConfig.from_yaml("configs/rq3.yaml")
+    assert tr.model == rq3.model == MODEL
+    assert (tr.instruction, tr.max_length_query, tr.max_length_doc) == \
+        (rq3.instruction, rq3.max_length_query, rq3.max_length_doc)
+    assert tr == T.RetrieverTrainConfig(autocast="bfloat16")  # the file spells out the logged defaults
+    raw = yaml.safe_load(open("configs/rq3.yaml"))
+    assert raw["folds"] == "results/folds.csv" and raw["data_config"] == "configs/data.yaml"
