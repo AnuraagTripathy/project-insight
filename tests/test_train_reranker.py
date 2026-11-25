@@ -441,3 +441,41 @@ def test_condition_E_and_ablation_configs_change_one_thing_from_D():
     assert te.mine_ranks == [30, 100] and te.mine_weight == 0.3
     assert replace(tc, kinds=td.kinds) == td and tc.kinds == ["core"]
     assert len({d["tag"], e["tag"], dc["tag"]}) == 3 and len({d["work_dir"], e["work_dir"], dc["work_dir"]}) == 3
+
+
+# ---------- RQ3 full pipeline: trained adapters on a per-fold shortlist ----------
+
+def test_check_shortlist_fold_accepts_matching_and_unfolded_shortlists():
+    sl = pd.DataFrame({"query_id": ["a", "a", "b"], "rank": [1, 2, 1], "doc_id": ["x", "y", "z"],
+                       "score": [0.0] * 3, "fold": [2, 2, 2]})
+    T.check_shortlist_fold(sl, 2, ["a", "b"])
+    T.check_shortlist_fold(sl.drop(columns="fold"), 0, ["a", "b"])  # B's shortlist: no fold column
+
+
+def test_check_shortlist_fold_rejects_other_folds_and_missing_questions():
+    sl = pd.DataFrame({"query_id": ["a", "b"], "rank": [1, 1], "doc_id": ["x", "z"],
+                       "score": [0.0, 0.0], "fold": [2, 3]})
+    with pytest.raises(ValueError, match="from fold"):
+        T.check_shortlist_fold(sl, 2, ["a", "b"])
+    with pytest.raises(ValueError, match="no shortlist rows"):
+        T.check_shortlist_fold(sl, 2, ["a", "c"])
+
+
+def test_rq3_shortlist_folds_match_the_committed_splits():
+    path = data.ROOT / "results" / "shortlist_rq3.parquet"
+    if not path.exists():
+        pytest.skip("results/shortlist_rq3.parquet not committed")
+    sl = pd.read_parquet(path)
+    for s in T.splits_from_csv(data.ROOT / "results" / "folds.csv"):
+        T.check_shortlist_fold(sl, s.fold, s.test)
+
+
+def test_E_rq3_config_is_E_with_the_rq3_shortlist_and_E_adapters():
+    import yaml
+
+    e = yaml.safe_load((data.ROOT / "configs" / "E.yaml").read_text())
+    p = yaml.safe_load((data.ROOT / "configs" / "E_rq3.yaml").read_text())
+    changed = {"shortlist", "adapters_from", "tag", "work_dir"}
+    assert {k: v for k, v in p.items() if k not in changed} == {k: v for k, v in e.items() if k not in changed}
+    assert p["shortlist"] == "results/shortlist_rq3.parquet" and p["adapters_from"] == e["work_dir"]
+    assert p["tag"] != e["tag"] and p["work_dir"] != e["work_dir"]

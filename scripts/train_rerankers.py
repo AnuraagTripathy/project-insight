@@ -17,6 +17,11 @@ Full run (H100): uv run python scripts/train_rerankers.py --config configs/D.yam
 Resume after an interruption: add --resume (finished folds are reused; a fold whose adapter
 exists but whose held-out scores do not, for example because the shortlist was missing, is
 rescored from the saved adapter without retraining).
+Score only, with adapters trained earlier (no training): a config with `adapters_from` (for
+example configs/E_rq3.yaml, condition E's adapters on the RQ3 shortlist), or --adapters-from DIR.
+Fold f is rescored with DIR/fold<f>/adapter. A shortlist with a `fold` column (from a trained
+retriever) must hold each test question's rows from that same fold (checked).
+    uv run python scripts/train_rerankers.py --config configs/E_rq3.yaml
 CPU smoke test:  uv run python scripts/train_rerankers.py --folds 0 --dtype float32 --fields title \
     --max-train-pairs 20 --max-val-queries 2 --test-limit 2 --epochs 1 --depth 10 \
     --shortlist results/run_A.parquet --tag smoke --work-dir outputs/smoke_D --out-dir outputs/smoke_D
@@ -59,6 +64,8 @@ def main():
     ap.add_argument("--out-dir", default=str(data.ROOT / "results"))
     ap.add_argument("--shortlist", default=None, help="override the config's shortlist")
     ap.add_argument("--resume", action="store_true", help="reuse finished folds and saved adapters")
+    ap.add_argument("--adapters-from", default=None,
+                    help="score only: rescore fold f with <dir>/fold<f>/adapter (default: the config's adapters_from)")
     # Overrides, mostly for the CPU smoke test
     ap.add_argument("--model", default=None)
     ap.add_argument("--dtype", default=None)
@@ -84,6 +91,10 @@ def main():
         tcfg = replace(tcfg, gradient_checkpointing=True)
     tag = args.tag or raw.get("tag", "D")
     work = data.ROOT / (args.work_dir or raw.get("work_dir", f"outputs/{tag}"))
+    src = args.adapters_from or raw.get("adapters_from")
+    src = data.ROOT / src if src else None
+    if src is not None and src.resolve() == work.resolve():
+        raise SystemExit(f"--adapters-from {src} is the work dir: scoring would overwrite that condition's runs")
     smoke = any(v is not None for v in [args.max_train_pairs, args.max_val_queries, args.test_limit])
 
     ds = data.load(data.DataConfig.from_yaml(data.ROOT / raw.get("data_config", "configs/data.yaml")))
@@ -113,10 +124,26 @@ def main():
             continue
         fdir.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
-        if args.resume and (adapter / "adapter_config.json").exists():
+        test_q = list(sp.test)[:args.test_limit] if args.test_limit is not None else list(sp.test)
+        if shortlist is not None:
+            T.check_shortlist_fold(shortlist, sp.fold, test_q)
+        if src is not None:
+            sdir = src / f"fold{sp.fold}"
+            if not (sdir / "adapter" / "adapter_config.json").exists():
+                raise SystemExit(f"fold {sp.fold}: no adapter in {sdir / 'adapter'}")
+            print(f"fold {sp.fold}: score only, adapters from {sdir / 'adapter'}, shortlist {sl_path.name}")
+            rr = load_reranker(rcfg, sdir / "adapter")
+            run_df, pairs = T.score_test_fold(rr, table, test_q, question_of, text_of, shortlist,
+                                              rcfg.depth, rcfg.top_k, tcfg.eval_batch_size)
+            run_df, pairs = run_df.assign(fold=sp.fold), pairs.assign(fold=sp.fold)
+            if (sdir / "history.csv").exists():  # the training history of the adapters, unchanged
+                pd.read_csv(sdir / "history.csv").to_csv(fdir / "history.csv", index=False)
+            (fdir / "summary.json").write_text(json.dumps(
+                dict(adapters_from=str(sdir / "adapter"), shortlist=str(sl_path), n_test_questions=len(test_q),
+                     rerank_config=asdict(rcfg), smoke=smoke), indent=2))
+        elif args.resume and (adapter / "adapter_config.json").exists():
             print(f"fold {sp.fold}: rescoring held-out questions from {adapter}")
             rr = load_reranker(rcfg, adapter)
-            test_q = list(sp.test)[:args.test_limit] if args.test_limit is not None else list(sp.test)
             run_df, pairs = T.score_test_fold(rr, table, test_q, question_of, text_of, shortlist,
                                               rcfg.depth, rcfg.top_k, tcfg.eval_batch_size)
             run_df, pairs = run_df.assign(fold=sp.fold), pairs.assign(fold=sp.fold)
@@ -149,8 +176,8 @@ def main():
     have_run = all((d / "run.parquet").exists() for d in fdirs)
     run_df = (pd.concat([pd.read_parquet(d / "run.parquet") for d in fdirs], ignore_index=True)
               if have_run else pd.DataFrame(columns=["query_id", "rank", "doc_id", "score", "first_rank", "fold"]))
-    hist = pd.concat([pd.read_csv(d / "history.csv") for d in fdirs if (d / "history.csv").exists()],
-                     ignore_index=True)
+    hists = [pd.read_csv(d / "history.csv") for d in fdirs if (d / "history.csv").exists()]
+    hist = pd.concat(hists, ignore_index=True) if hists else pd.DataFrame()
     qids = list(dict.fromkeys(pairs.query_id))
     assert pairs.groupby("query_id").fold.nunique().max() == 1, "a question scored in two folds"
     per_q = R.per_question(run_df, pairs, table, qids)

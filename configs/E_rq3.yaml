@@ -1,0 +1,48 @@
+# RQ3 full pipeline: the RQ3 shortlist (fine-tuned Qwen3-Embedding-0.6B, one retriever per fold)
+# rescored by condition E's reranker adapters, with no new training. Fold f's test questions are
+# rescored by outputs/E/fold<f>/adapter, the adapter trained on the same training folds as fold f's
+# retriever (scripts/train_rerankers.py checks the shortlist's fold column). Which reranker to stack
+# is a judgment call (decision log, Nov 25): E has the highest Recall@20 of the trained rerankers on
+# B's shortlist. For D instead, copy this file with D's rerank section, adapters_from: outputs/D,
+# tag D_rq3. Everything except shortlist, adapters_from, tag and work_dir equals configs/E.yaml
+# (a test checks this).
+rerank:
+  model: Qwen/Qwen3-Reranker-0.6B
+  instruction: "Given a research question, judge whether the paper could inspire the research: its scientific contribution would meaningfully inform how a researcher thinks about or approaches the question, rather than being merely topically related"
+  fields: [title, text]
+  field_sep: "\n"
+  max_length: 8192
+  batch_size: 16
+  dtype: bfloat16
+  attn_implementation: sdpa
+  depth: 100
+  top_k: 100
+train:
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  lr: 1.0e-4
+  weight_decay: 0.0
+  warmup_frac: 0.05
+  epochs: 3
+  batch_pairs: 8
+  grad_accum: 4
+  max_grad_norm: 1.0
+  gradient_checkpointing: false
+  eval_every: null
+  patience: 2
+  eval_batch_size: 32
+  max_pairs_per_query: null
+  kinds: [core, subfield]
+  seed: 0
+  mine_ranks: [30, 100]
+  mine_weight: 0.3
+  mine_per_query: 10
+  mine_exclude_project_positives: true
+shortlist: results/shortlist_rq3.parquet
+adapters_from: outputs/E
+folds: results/folds.csv
+data_config: configs/data.yaml
+tag: E_rq3
+work_dir: outputs/E_rq3

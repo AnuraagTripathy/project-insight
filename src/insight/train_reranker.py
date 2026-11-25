@@ -361,6 +361,27 @@ def splits_from_csv(path) -> list:
     return out
 
 
+def check_shortlist_fold(shortlist: pd.DataFrame, fold: int, test_q) -> None:
+    """Refuse a per-fold shortlist whose rows for this fold's test questions came from another fold.
+
+    A shortlist built by a trained retriever (RQ3, results/shortlist_rq3.parquet) carries a `fold`
+    column: the fold whose retriever held the question out. The fold-f reranker may only rescore a
+    test question's shortlist when that shortlist came from the fold-f retriever, so neither model
+    was trained on the question. Every test question must also have rows. A shortlist without a
+    `fold` column (condition B, no training) is the same for every fold and is not checked.
+    """
+    if "fold" not in shortlist.columns:
+        return
+    sl = shortlist[shortlist.query_id.isin(set(test_q))]
+    missing = sorted(set(test_q) - set(sl.query_id))
+    if missing:
+        raise ValueError(f"fold {fold}: {len(missing)} test questions have no shortlist rows, e.g. {missing[0]}")
+    wrong = sl[sl.fold != fold]
+    if len(wrong):
+        raise ValueError(f"fold {fold}: {wrong.query_id.nunique()} test questions have shortlist rows "
+                         f"from fold(s) {sorted(wrong.fold.unique().tolist())}")
+
+
 def score_texts(reranker, queries: list[str], docs: list[str], batch_size: int) -> np.ndarray:
     """Scores for (queries[i], docs[i]) with the reranker's current weights (adapters included)."""
     ids = [reranker.token_ids(q, d) for q, d in zip(queries, docs)]
