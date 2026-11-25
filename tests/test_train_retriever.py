@@ -216,6 +216,27 @@ def test_training_is_seeded():
     assert torch.equal(runs[0], runs[1])
 
 
+def test_grad_cache_gives_the_full_batch_loss_and_gradients():
+    table, question_of, text_of = _toy_retrieval()
+    cfg = T.RetrieverTrainConfig(max_length_query=64, max_length_doc=64, grad_cache_chunk=2)
+    qtexts = [question_of[q] for q in table.index]
+    dtexts = [text_of[d] for d in sorted(text_of)]  # 12 papers of different lengths, so chunks pad differently
+    target, mask = np.arange(6) * 2, np.ones((6, 12), dtype=bool)
+    enc = TinyEncoder()
+    enc.model.train()
+
+    full = T.info_nce(T.embed(enc, qtexts, 64), T.embed(enc, dtexts, 64), torch.as_tensor(target),
+                      torch.as_tensor(mask), cfg.tau)
+    full.backward()
+    g_full = {n: p.grad.clone() for n, p in enc.model.named_parameters()}
+    enc.model.zero_grad()
+    cached = T.grad_cache_step(enc, qtexts, dtexts, target, mask, cfg)
+    assert torch.allclose(cached, full.detach(), atol=1e-5)
+    # Chunks pad to different lengths, which moves float32 rounding, so compare to each gradient's scale.
+    for n, p in enc.model.named_parameters():
+        assert (p.grad - g_full[n]).abs().max() <= 1e-4 * g_full[n].abs().max(), n
+
+
 # ---------- real data ----------
 
 @needs_data

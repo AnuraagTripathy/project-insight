@@ -74,6 +74,10 @@ def main():
     ap.add_argument("--hard-negatives", type=int, default=None)
     ap.add_argument("--encode-batch-size", type=int, default=None)
     ap.add_argument("--gradient-checkpointing", action="store_true")
+    ap.add_argument("--grad-cache-chunk", type=int, default=None,
+                    help="texts per chunk for gradient caching (same gradients, less memory)")
+    ap.add_argument("--eval-batch-size", type=int, default=None,
+                    help="texts per batch in validation encoding (memory only, same vectors)")
     ap.add_argument("--val-pool-size", type=int, default=None)
     ap.add_argument("--max-train-examples", type=int, default=None, help="seeded subset of examples (smoke)")
     ap.add_argument("--max-val-queries", type=int, default=None, help="first N validation questions (smoke)")
@@ -88,7 +92,8 @@ def main():
                                                "batch_size": args.encode_batch_size}.items() if v is not None})
     tcfg = T.RetrieverTrainConfig.from_yaml(args.config)
     over = {"lr": args.lr, "epochs": args.epochs, "batch_size": args.batch_size,
-            "hard_negatives": args.hard_negatives, "val_pool_size": args.val_pool_size}
+            "hard_negatives": args.hard_negatives, "val_pool_size": args.val_pool_size,
+            "grad_cache_chunk": args.grad_cache_chunk, "eval_batch_size": args.eval_batch_size}
     tcfg = replace(tcfg, **{k: v for k, v in over.items() if v is not None})
     if args.lora_r is not None:
         tcfg = replace(tcfg, lora_r=args.lora_r)

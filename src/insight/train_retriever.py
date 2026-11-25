@@ -70,6 +70,9 @@ class RetrieverTrainConfig:
     batch_size: int = 32  # examples (question, credited paper) per step
     max_grad_norm: float = 1.0
     gradient_checkpointing: bool = False
+    # Gradient caching: run the forward/backward in chunks of this many texts with the same loss and
+    # gradients as one full batch (grad_cache_step); None = whole batch at once. For 24 GB GPUs.
+    grad_cache_chunk: int | None = None
     autocast: str | None = None  # "bfloat16" on the H100 (weights stay float32); None on CPU
     # Early stopping on validation pool recall
     eval_every: int | None = None  # steps between evaluations; None = once per epoch
@@ -174,6 +177,38 @@ def embed(encoder, texts: list[str], max_length: int):
     batch = encoder.tokenize(texts, max_length)
     hidden = encoder.model(**batch).last_hidden_state
     return F.normalize(last_token_pool(hidden, batch["attention_mask"]).float(), p=2, dim=1)
+
+
+def grad_cache_step(encoder, qtexts: list[str], dtexts: list[str], target, mask, cfg, ac=None):
+    """InfoNCE loss with its gradients accumulated in the model, `cfg.grad_cache_chunk` texts at a time
+    (gradient caching, Gao et al. 2021). Same loss and gradients as embedding the whole batch and
+    calling backward once, but only one chunk's activations are held in memory:
+      1. embed every text without gradients;
+      2. backpropagate the loss to the embeddings only, giving dL/de for each text;
+      3. re-embed each chunk with gradients and backpropagate sum(e * dL/de) through the model,
+         which by the chain rule adds exactly that chunk's share of dL/dweights.
+    ac: an autocast context or None. Returns the loss (detached).
+    """
+    import contextlib
+
+    torch = encoder.torch
+    n = cfg.grad_cache_chunk
+    ctx = ac if ac is not None else contextlib.nullcontext()
+    # ponytail: step 3 reruns the forward pass, so it is exact only without dropout (true for full
+    # fine-tuning of Qwen3); with LoRA dropout, save and restore the RNG state per chunk.
+    groups = [(qtexts, cfg.max_length_query), (dtexts, cfg.max_length_doc)]
+    with torch.no_grad(), ctx:
+        embs = [torch.cat([embed(encoder, t[i:i + n], L) for i in range(0, len(t), n)]) for t, L in groups]
+    embs = [e.detach().requires_grad_() for e in embs]
+    loss = info_nce(embs[0], embs[1], torch.as_tensor(target, device=embs[0].device),
+                    torch.as_tensor(mask, device=embs[0].device), cfg.tau)
+    loss.backward()
+    for (t, L), e in zip(groups, embs):
+        for i in range(0, len(t), n):
+            with ctx:
+                part = embed(encoder, t[i:i + n], L)
+            (part * e.grad[i:i + n]).sum().backward()
+    return loss.detach()
 
 
 def encode_texts(encoder, texts: list[str], max_length: int, batch_size: int,
@@ -328,14 +363,17 @@ def train(encoder, examples: pd.DataFrame, table: pd.DataFrame, question_of: dic
                                                  cfg.mask_project_positives, proj_pos)
             qtexts = [format_query(question_of[q], cfg.instruction) for q in qids]
             dtexts = [text_of[d] for d in docs]
-            if ac is not None:
-                with ac:
-                    qe, de = embed(encoder, qtexts, cfg.max_length_query), embed(encoder, dtexts, cfg.max_length_doc)
+            if cfg.grad_cache_chunk:
+                loss = grad_cache_step(encoder, qtexts, dtexts, target, mask, cfg, ac)
             else:
-                qe, de = embed(encoder, qtexts, cfg.max_length_query), embed(encoder, dtexts, cfg.max_length_doc)
-            loss = info_nce(qe, de, torch.as_tensor(target, device=qe.device),
-                            torch.as_tensor(mask, device=qe.device), cfg.tau)
-            loss.backward()
+                if ac is not None:
+                    with ac:
+                        qe, de = embed(encoder, qtexts, cfg.max_length_query), embed(encoder, dtexts, cfg.max_length_doc)
+                else:
+                    qe, de = embed(encoder, qtexts, cfg.max_length_query), embed(encoder, dtexts, cfg.max_length_doc)
+                loss = info_nce(qe, de, torch.as_tensor(target, device=qe.device),
+                                torch.as_tensor(mask, device=qe.device), cfg.tau)
+                loss.backward()
             torch.nn.utils.clip_grad_norm_(trainable, cfg.max_grad_norm)
             opt.step()
             sched.step()
