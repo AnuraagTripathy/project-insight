@@ -1,0 +1,10 @@
+# Paired bootstrap over projects (insight.stats), used by notebooks/08_results_tables.ipynb.
+n_boot: 10000          # bootstrap samples
+seed: 0
+ci: 0.95               # percentile interval
+# Pre vs post release check: source papers published before this day vs on or after it.
+# Qwen3 Embedding report arXiv:2506.05176 v1 was submitted Thu 5 Jun 2025.
+release_date: "2025-06-05"
+# Memorization check: a held-out credited paper is "seen" if it is credited for a question of
+# these roles in the same fold (train = gradient steps, val = early stopping).
+seen_roles: [train, val]
